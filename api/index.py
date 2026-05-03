@@ -3,6 +3,14 @@ YOLO Vision Dashboard - Vercel Serverless Entry Point
 This file is auto-detected by Vercel's Python runtime.
 """
 import os
+import sys
+
+# Ensure the api/ directory is in the Python path so that
+# sub-packages (routes/) can resolve sibling modules like
+# supabase_client and middleware via absolute imports.
+API_DIR = os.path.dirname(os.path.abspath(__file__))
+if API_DIR not in sys.path:
+    sys.path.insert(0, API_DIR)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
