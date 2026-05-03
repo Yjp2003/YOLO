@@ -1,13 +1,16 @@
 """
 Supabase HTTP client for Vercel Serverless.
-Uses httpx to call the Supabase REST API directly,
-avoiding supabase-py SDK issues with read-only filesystems.
+Uses Python's built-in urllib to avoid any third-party library issues
+with Vercel's read-only filesystem and serverless constraints.
 """
 import os
-import httpx
+import json
+import urllib.request
+import urllib.error
+import urllib.parse
 
 # Timeout for HTTP requests (seconds)
-_TIMEOUT = 15.0
+_TIMEOUT = 15
 
 
 def _get_config():
@@ -19,6 +22,32 @@ def _get_config():
     }
 
 
+def _do_request(method: str, url: str, headers: dict, body: dict | None = None) -> dict | list | None:
+    """
+    Perform an HTTP request using urllib (standard library).
+    Returns parsed JSON response or raises an Exception with details.
+    """
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8")
+            if raw:
+                return json.loads(raw)
+            return None
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(error_body)
+        except Exception:
+            detail = error_body
+        raise Exception(f"HTTP {e.code}: {detail}")
+
+
 # ============================================
 # Auth helpers (Supabase GoTrue REST API)
 # ============================================
@@ -27,11 +56,10 @@ def admin_create_user(email: str, password: str, user_metadata: dict | None = No
     """
     Create a user via the Supabase Admin API.
     POST /auth/v1/admin/users
-    Requires service_role_key.
     """
     cfg = _get_config()
-    url = f"{cfg['url']}/auth/v1/admin/users"
     key = cfg["service_role_key"] or cfg["anon_key"]
+    url = f"{cfg['url']}/auth/v1/admin/users"
 
     body = {
         "email": email,
@@ -41,22 +69,13 @@ def admin_create_user(email: str, password: str, user_metadata: dict | None = No
     if user_metadata:
         body["user_metadata"] = user_metadata
 
-    resp = httpx.post(
-        url,
-        json=body,
-        headers={
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        },
-        timeout=_TIMEOUT,
-    )
+    result = _do_request("POST", url, {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }, body)
 
-    if resp.status_code >= 400:
-        detail = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
-        raise Exception(f"Supabase admin create_user failed ({resp.status_code}): {detail}")
-
-    return resp.json()
+    return result
 
 
 def admin_delete_user(user_id: str) -> None:
@@ -68,17 +87,10 @@ def admin_delete_user(user_id: str) -> None:
     key = cfg["service_role_key"] or cfg["anon_key"]
     url = f"{cfg['url']}/auth/v1/admin/users/{user_id}"
 
-    resp = httpx.delete(
-        url,
-        headers={
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-        },
-        timeout=_TIMEOUT,
-    )
-
-    if resp.status_code >= 400:
-        raise Exception(f"Supabase admin delete_user failed ({resp.status_code}): {resp.text}")
+    _do_request("DELETE", url, {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+    })
 
 
 def sign_in_with_password(email: str, password: str) -> dict:
@@ -89,21 +101,12 @@ def sign_in_with_password(email: str, password: str) -> dict:
     cfg = _get_config()
     url = f"{cfg['url']}/auth/v1/token?grant_type=password"
 
-    resp = httpx.post(
-        url,
-        json={"email": email, "password": password},
-        headers={
-            "apikey": cfg["anon_key"],
-            "Content-Type": "application/json",
-        },
-        timeout=_TIMEOUT,
-    )
+    result = _do_request("POST", url, {
+        "apikey": cfg["anon_key"],
+        "Content-Type": "application/json",
+    }, {"email": email, "password": password})
 
-    if resp.status_code >= 400:
-        detail = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
-        raise Exception(f"Login failed ({resp.status_code}): {detail}")
-
-    return resp.json()
+    return result
 
 
 def get_user_by_token(token: str) -> dict:
@@ -114,19 +117,12 @@ def get_user_by_token(token: str) -> dict:
     cfg = _get_config()
     url = f"{cfg['url']}/auth/v1/user"
 
-    resp = httpx.get(
-        url,
-        headers={
-            "apikey": cfg["anon_key"],
-            "Authorization": f"Bearer {token}",
-        },
-        timeout=_TIMEOUT,
-    )
+    result = _do_request("GET", url, {
+        "apikey": cfg["anon_key"],
+        "Authorization": f"Bearer {token}",
+    })
 
-    if resp.status_code >= 400:
-        raise Exception(f"Token verification failed ({resp.status_code}): {resp.text}")
-
-    return resp.json()
+    return result
 
 
 # ============================================
@@ -139,86 +135,65 @@ def db_select(table: str, columns: str = "*", filters: dict | None = None,
               token: str | None = None) -> list:
     """
     SELECT from a PostgREST table.
-    GET /rest/v1/{table}?select={columns}&...
     """
     cfg = _get_config()
-    url = f"{cfg['url']}/rest/v1/{table}"
     key = cfg["anon_key"]
 
     params = {"select": columns}
+    if filters:
+        for col, val in filters.items():
+            params[col] = f"eq.{val}"
+    if order:
+        params["order"] = f"{order}.{'desc' if desc else 'asc'}"
+
+    qs = urllib.parse.urlencode(params)
+    url = f"{cfg['url']}/rest/v1/{table}?{qs}"
+
     headers = {
         "apikey": key,
         "Authorization": f"Bearer {token or key}",
     }
-
-    if filters:
-        for col, val in filters.items():
-            params[col] = f"eq.{val}"
-
-    if order:
-        params["order"] = f"{order}.{'desc' if desc else 'asc'}"
-
     if limit is not None:
         headers["Range"] = f"{offset or 0}-{(offset or 0) + limit - 1}"
         headers["Prefer"] = "count=exact"
 
-    resp = httpx.get(url, params=params, headers=headers, timeout=_TIMEOUT)
-
-    if resp.status_code >= 400:
-        raise Exception(f"DB select failed ({resp.status_code}): {resp.text}")
-
-    return resp.json()
+    result = _do_request("GET", url, headers)
+    return result if isinstance(result, list) else []
 
 
 def db_insert(table: str, data: dict, token: str | None = None) -> list:
     """
     INSERT into a PostgREST table.
-    POST /rest/v1/{table}
     """
     cfg = _get_config()
-    url = f"{cfg['url']}/rest/v1/{table}"
     key = cfg["anon_key"]
+    url = f"{cfg['url']}/rest/v1/{table}"
 
-    resp = httpx.post(
-        url,
-        json=data,
-        headers={
-            "apikey": key,
-            "Authorization": f"Bearer {token or key}",
-            "Content-Type": "application/json",
-            "Prefer": "return=representation",
-        },
-        timeout=_TIMEOUT,
-    )
+    result = _do_request("POST", url, {
+        "apikey": key,
+        "Authorization": f"Bearer {token or key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }, data)
 
-    if resp.status_code >= 400:
-        raise Exception(f"DB insert failed ({resp.status_code}): {resp.text}")
-
-    return resp.json()
+    return result if isinstance(result, list) else []
 
 
 def db_delete(table: str, filters: dict, token: str | None = None) -> None:
     """
     DELETE from a PostgREST table.
-    DELETE /rest/v1/{table}?filters...
     """
     cfg = _get_config()
-    url = f"{cfg['url']}/rest/v1/{table}"
     key = cfg["anon_key"]
 
     params = {}
     for col, val in filters.items():
         params[col] = f"eq.{val}"
 
-    resp = httpx.delete(
-        url,
-        params=params,
-        headers={
-            "apikey": key,
-            "Authorization": f"Bearer {token or key}",
-        },
-        timeout=_TIMEOUT,
-    )
+    qs = urllib.parse.urlencode(params)
+    url = f"{cfg['url']}/rest/v1/{table}?{qs}"
 
-    if resp.status_code >= 400:
-        raise Exception(f"DB delete failed ({resp.status_code}): {resp.text}")
+    _do_request("DELETE", url, {
+        "apikey": key,
+        "Authorization": f"Bearer {token or key}",
+    })
