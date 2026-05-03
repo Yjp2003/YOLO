@@ -4,7 +4,7 @@ Uses Supabase Auth with username → email mapping (username@yolo-vision.com).
 """
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from supabase_client import get_supabase_client, get_supabase_admin
+from supabase_client import admin_create_user, sign_in_with_password
 
 router = APIRouter()
 
@@ -40,26 +40,23 @@ async def register(req: AuthRequest):
         raise HTTPException(status_code=400, detail="密码至少需要6个字符")
 
     email = username_to_email(req.username)
-    supabase = get_supabase_admin()
 
     try:
-        result = supabase.auth.admin.create_user({
-            "email": email,
-            "password": req.password,
-            "email_confirm": True,
-            "user_metadata": {
-                "username": req.username,
-            }
-        })
+        result = admin_create_user(
+            email=email,
+            password=req.password,
+            user_metadata={"username": req.username},
+        )
 
-        if result.user is None:
+        user_id = result.get("id")
+        if not user_id:
             raise HTTPException(status_code=400, detail="注册失败")
 
         return AuthResponse(
             success=True,
             message="注册成功",
             username=req.username,
-            user_id=str(result.user.id),
+            user_id=user_id,
         )
 
     except HTTPException:
@@ -78,23 +75,22 @@ async def login(req: AuthRequest):
         raise HTTPException(status_code=400, detail="请输入用户名和密码")
 
     email = username_to_email(req.username)
-    supabase = get_supabase_client()
 
     try:
-        result = supabase.auth.sign_in_with_password({
-            "email": email,
-            "password": req.password,
-        })
+        result = sign_in_with_password(email=email, password=req.password)
 
-        if result.session is None:
+        access_token = result.get("access_token")
+        user = result.get("user", {})
+
+        if not access_token:
             raise HTTPException(status_code=401, detail="用户名或密码错误")
 
         return AuthResponse(
             success=True,
             message="登录成功",
-            token=result.session.access_token,
+            token=access_token,
             username=req.username,
-            user_id=str(result.user.id),
+            user_id=user.get("id", ""),
         )
 
     except HTTPException:

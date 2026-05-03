@@ -4,7 +4,7 @@ Extracts and verifies the Supabase JWT from the Authorization header.
 """
 from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from supabase_client import get_supabase_client
+from supabase_client import get_user_by_token
 
 security = HTTPBearer()
 
@@ -19,18 +19,19 @@ async def get_current_user(
     token = credentials.credentials
 
     try:
-        supabase = get_supabase_client()
-        # Use Supabase to verify the token and get user
-        user_response = supabase.auth.get_user(token)
+        user = get_user_by_token(token)
 
-        if not user_response or not user_response.user:
+        if not user or not user.get("id"):
             raise HTTPException(status_code=401, detail="无效的认证令牌")
 
-        user = user_response.user
+        email = user.get("email", "")
+        metadata = user.get("user_metadata", {})
+        username = metadata.get("username", email.split("@")[0] if email else "unknown")
+
         return {
-            "id": str(user.id),
-            "email": user.email,
-            "username": user.user_metadata.get("username", user.email.split("@")[0]) if user.email else "unknown",
+            "id": user["id"],
+            "email": email,
+            "username": username,
             "token": token,
         }
 

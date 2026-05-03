@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
 from middleware import get_current_user
-from supabase_client import get_supabase_client
+from supabase_client import db_select, db_insert, db_delete
 
 router = APIRouter()
 
@@ -49,23 +49,20 @@ async def list_records(
     offset: int = 0,
 ):
     """Get detection records for the current user, newest first. Supports pagination."""
-    supabase = get_supabase_client()
-    # Set auth context for RLS
-    supabase.postgrest.auth(user["token"])
-
     try:
-        query = (
-            supabase.table("detection_records")
-            .select("*", count="exact")
-            .eq("user_id", user["id"])
-            .order("created_at", desc=True)
-            .range(offset, offset + limit - 1)
+        records = db_select(
+            table="detection_records",
+            filters={"user_id": user["id"]},
+            order="created_at",
+            desc=True,
+            limit=limit,
+            offset=offset,
+            token=user["token"],
         )
-        result = query.execute()
         return {
             "success": True,
-            "records": result.data,
-            "total": result.count if result.count is not None else len(result.data),
+            "records": records,
+            "total": len(records),
             "limit": limit,
             "offset": offset,
         }
@@ -76,9 +73,6 @@ async def list_records(
 @router.post("")
 async def create_record(record: RecordCreate, user: dict = Depends(get_current_user)):
     """Save a new detection record."""
-    supabase = get_supabase_client()
-    supabase.postgrest.auth(user["token"])
-
     try:
         data = {
             "user_id": user["id"],
@@ -91,10 +85,14 @@ async def create_record(record: RecordCreate, user: dict = Depends(get_current_u
             "video_clips": record.video_clips,
         }
 
-        result = supabase.table("detection_records").insert(data).execute()
+        result = db_insert(
+            table="detection_records",
+            data=data,
+            token=user["token"],
+        )
 
-        if result.data:
-            return {"success": True, "record": result.data[0]}
+        if result:
+            return {"success": True, "record": result[0]}
         raise HTTPException(status_code=500, detail="保存记录失败")
 
     except HTTPException:
@@ -106,16 +104,11 @@ async def create_record(record: RecordCreate, user: dict = Depends(get_current_u
 @router.delete("/{record_id}")
 async def delete_record(record_id: str, user: dict = Depends(get_current_user)):
     """Delete a specific detection record."""
-    supabase = get_supabase_client()
-    supabase.postgrest.auth(user["token"])
-
     try:
-        result = (
-            supabase.table("detection_records")
-            .delete()
-            .eq("id", record_id)
-            .eq("user_id", user["id"])
-            .execute()
+        db_delete(
+            table="detection_records",
+            filters={"id": record_id, "user_id": user["id"]},
+            token=user["token"],
         )
         return {"success": True, "message": "记录已删除"}
     except Exception as e:

@@ -5,7 +5,7 @@ Uses Supabase admin client for cross-user operations.
 from fastapi import APIRouter, HTTPException, Depends
 
 from middleware import get_current_user
-from supabase_client import get_supabase_admin, get_supabase_client
+from supabase_client import db_select, admin_delete_user
 
 router = APIRouter()
 
@@ -13,17 +13,15 @@ router = APIRouter()
 @router.get("")
 async def list_users(user: dict = Depends(get_current_user)):
     """Get list of all registered users (from profiles table)."""
-    supabase = get_supabase_client()
-    supabase.postgrest.auth(user["token"])
-
     try:
-        result = (
-            supabase.table("profiles")
-            .select("id, username, role, created_at")
-            .order("created_at", desc=False)
-            .execute()
+        users = db_select(
+            table="profiles",
+            columns="id, username, role, created_at",
+            order="created_at",
+            desc=False,
+            token=user["token"],
         )
-        return {"success": True, "users": result.data}
+        return {"success": True, "users": users}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取用户列表失败: {str(e)}")
 
@@ -36,9 +34,7 @@ async def delete_user(user_id: str, user: dict = Depends(get_current_user)):
 
     try:
         # Delete from auth.users (cascades to profiles via FK)
-        admin = get_supabase_admin()
-        admin.auth.admin.delete_user(user_id)
-
+        admin_delete_user(user_id)
         return {"success": True, "message": "用户已删除"}
     except HTTPException:
         raise
